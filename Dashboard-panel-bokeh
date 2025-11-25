@@ -1,0 +1,281 @@
+"""
+Dashboard Panel + Bokeh : Students Performance
+----------------------------------------------
+Dashboard interactif utilisant Panel (UI) et Bokeh (graphiques).
+Lancement :
+    panel serve dashboard_panel.py --show
+"""
+
+import pandas as pd
+import numpy as np
+import math
+import panel as pn
+pn.extension("tabulator")
+
+from bokeh.plotting import figure
+from bokeh.models import (
+    ColumnDataSource, Select, MultiSelect, Slider,
+    Div, CheckboxGroup
+)
+from bokeh.transform import factor_cmap
+from bokeh.palettes import Category20, Spectral6
+
+# -------------------------------------------------------------
+# 1. DATA
+# -------------------------------------------------------------
+df = pd.read_csv("StudentsPerformance.csv")
+# Si la colonne race/ethnicity n'existe pas, ignore la suppression pour éviter erreur
+if "race/ethnicity" in df.columns:
+    df = df.drop(columns=["race/ethnicity"])
+# Normalisation et format
+if "state" in df.columns:
+    df["state"] = df["state"].astype(str).str.title()
+else:
+    df["state"] = "Unknown"
+
+matiere = ["math score", "reading score", "writing score"]
+# calcul score moyen (si colonnes présentes)
+for col in matiere:
+    if col not in df.columns:
+        df[col] = np.nan
+df["score_moyen"] = df[matiere].mean(axis=1)
+
+# gestion années / états / genres
+years = sorted(df["year"].dropna().unique().astype(int).tolist())
+states = sorted(df["state"].dropna().unique().tolist())
+genders = sorted(df["gender"].dropna().unique().tolist())
+
+# -------------------------------------------------------------
+# 2. BOKEH SOURCES
+# -------------------------------------------------------------
+source_state_avg = ColumnDataSource(data=dict(state=[], score_moyen=[]))
+source_state_year = ColumnDataSource(data=dict(years=[], scores=[], colors=[], labels=[]))
+source_hist = ColumnDataSource(data=dict(left=[], right=[], count=[], color=[]))
+
+# -------------------------------------------------------------
+# 3. WIDGETS BOKEH / PANEL
+# -------------------------------------------------------------
+select_year = Select(title="Année", value=str(years[0]) if years else "0", options=[str(y) for y in years])
+select_states = MultiSelect(title="États", value=states[:3] if len(states) >= 3 else states, options=states, size=6)
+select_matiere = Select(title="Matière histogramme", value="math score", options=matiere)
+slider_min_score = Slider(title="Score minimum", value=0, start=0, end=100, step=1)
+checkbox_gender = CheckboxGroup(labels=genders, active=list(range(len(genders))))
+
+# -------------------------------------------------------------
+# 4. KPI HTML
+# -------------------------------------------------------------
+def kpi_block(bg, title, value):
+    return f"""
+    <div style="
+        background:{bg};
+        padding:15px; width:220px; color:white;
+        border-radius:12px; text-align:center;
+        font-family:Segoe UI; font-size:20px; font-weight:bold;">
+        {title}<br>{value}
+    </div>
+    """
+
+kpi1 = Div()
+kpi2 = Div()
+kpi3 = Div()
+kpi4 = Div()
+
+def update_kpi(filtered):
+    # sécurité si DataFrame vide
+    if filtered is None or len(filtered) == 0:
+        kpi1.text = kpi_block("#3366CC", "Score moyen", "N/A")
+        kpi2.text = kpi_block("#2E8B57", "Score max", "N/A")
+        kpi3.text = kpi_block("#B22222", "Score min", "N/A")
+        kpi4.text = kpi_block("#6A5ACD", "Nb élèves", "0")
+        return
+
+    mean_val = filtered['score_moyen'].mean()
+    max_val = filtered['score_moyen'].max()
+    min_val = filtered['score_moyen'].min()
+    kpi1.text = kpi_block("#3366CC", "Score moyen", f"{mean_val:.2f}")
+    kpi2.text = kpi_block("#2E8B57", "Score max", f"{max_val:.2f}")
+    kpi3.text = kpi_block("#B22222", "Score min", f"{min_val:.2f}")
+    kpi4.text = kpi_block("#6A5ACD", "Nb élèves", f"{len(filtered)}")
+
+# -------------------------------------------------------------
+# 5. GRAPHIQUES
+# -------------------------------------------------------------
+# -- Bar chart --
+p1 = figure(height=350, width=550, title="Score moyen par État", x_range=states)
+p1.xaxis.major_label_orientation = math.pi/3
+p1.vbar(
+    x="state", top="score_moyen",
+    width=0.7,
+    color=factor_cmap("state", Category20[20], states),
+    source=source_state_avg
+)
+
+# -- Multi-line --
+p2 = figure(height=420, width=850, title="Évolution du score moyen")
+p2.multi_line(xs="years", ys="scores", color="colors",
+              legend_field="labels", line_width=3,
+              source=source_state_year)
+p2.legend.location = "top_left"
+p2.legend.click_policy = "hide"
+
+# -- Histogramme --
+p3 = figure(height=350, width=550, title="Histogramme des scores")
+p3.quad(top="count", bottom=0, left="left", right="right",
+        fill_color="color", line_color="black",
+        source=source_hist)
+
+# -- Boxplot --
+p4 = figure(height=420, width=850, title="Boxplot des matières", x_range=matiere)
+
+def compute_box_stats(df_local, col):
+    q1 = df_local[col].quantile(0.25)
+    q2 = df_local[col].quantile(0.5)
+    q3 = df_local[col].quantile(0.75)
+    iqr = q3 - q1
+    upper = min(df_local[col].max(), q3 + 1.5 * iqr)
+    lower = max(df_local[col].min(), q1 - 1.5 * iqr)
+    return q1, q2, q3, upper, lower
+
+for i, col in enumerate(matiere):
+    # protéger si colonnes NaN
+    q1, q2, q3, upper, lower = compute_box_stats(df, col)
+    # segment pour les "whiskers"
+    p4.segment([i], [lower], [i], [upper], line_width=2)
+    # rectangles pour les boxes (bottom, top)
+    p4.vbar([i], 0.8, q2, q3, fill_color="#90CAF9")
+    p4.vbar([i], 0.8, q1, q2, fill_color="#90CAF9")
+    p4.rect([i], [q2], 0.4, 0.01)
+
+# -------------------------------------------------------------
+# 6. UPDATE MAIN FUNCTION (robuste aux widgets)
+# -------------------------------------------------------------
+def _unwrap(val):
+    """Si val est un widget Bokeh/Panel, renvoie sa valeur, sinon renvoie val."""
+    # Bokeh widget: .value ; Panel widgets aussi exposent .value
+    if hasattr(val, "value"):
+        return val.value
+    # slider could be a Panel slider with .value
+    if hasattr(val, "active"):
+        return val.active
+    return val
+
+def update_all(year, state_list, mat, min_score):
+    # Déballer si des widgets ont été passés
+    year = _unwrap(year)
+    state_list = _unwrap(state_list)
+    mat = _unwrap(mat)
+    min_score = _unwrap(min_score)
+
+    # cast approprie
+    try:
+        year = int(year)
+    except Exception:
+        # si échec, garder l'année la plus probable (première année disponible)
+        year = int(years[0]) if years else 0
+
+    # Récupération des genres actifs (widget global)
+    active = checkbox_gender.active
+    genders_sel = [checkbox_gender.labels[i] for i in active] if hasattr(checkbox_gender, "labels") else []
+
+    # Filtrer le dataframe
+    df_f = df[
+        (df["year"] == year) &
+        (df["gender"].isin(genders_sel)) &
+        (df["score_moyen"] >= float(min_score))
+    ]
+
+    # KPI
+    update_kpi(df_f)
+
+    # --- Bar chart (score moyen par état) ---
+    if len(df_f) > 0:
+        df_s = df_f.groupby("state", as_index=False)["score_moyen"].mean()
+    else:
+        df_s = pd.DataFrame({"state": [], "score_moyen": []})
+    # convertir en dict de listes pour ColumnDataSource
+    source_state_avg.data = df_s.to_dict(orient="list")
+
+    # --- Multi-line (évolution) ---
+    years_list = []
+    scores_list = []
+    # safe colors (répéter si besoin)
+    n = len(state_list) if state_list else 0
+    palette = [Spectral6[i % len(Spectral6)] for i in range(n)]
+
+    for st in (state_list or []):
+        tmp = df[df["state"] == st].sort_values("year")
+        years_list.append(tmp["year"].tolist())
+        scores_list.append(tmp["score_moyen"].tolist())
+
+    source_state_year.data = dict(
+        years=years_list,
+        scores=scores_list,
+        colors=palette,
+        labels=list(state_list or [])
+    )
+
+    # --- Histogramme ---
+    if len(df_f) > 0 and mat in df_f.columns:
+        counts, edges = np.histogram(df_f[mat].dropna(), bins=15)
+    else:
+        counts = np.array([])
+        edges = np.array([])
+
+    source_hist.data = dict(
+        left=edges[:-1].tolist() if len(edges) > 0 else [],
+        right=edges[1:].tolist() if len(edges) > 0 else [],
+        count=counts.tolist() if len(counts) > 0 else [],
+        color=["#4C72B0"] * (len(counts) if len(counts) > 0 else 0)
+    )
+
+# -------------------------------------------------------------
+# 7. PANEL BIND (propre et stable)
+# -------------------------------------------------------------
+# On peut binder directement les widgets : pn.bind passera les objets,
+# et update_all les déballera avec _unwrap.
+bound_update = pn.bind(
+    update_all,
+    year=select_year,
+    state_list=select_states,
+    mat=select_matiere,
+    min_score=slider_min_score,
+)
+
+# Exécuter l’update une seule fois quand Panel est prêt
+pn.state.onload(lambda: bound_update())
+
+# Aussi lier l'appel aux widgets pour mises à jour interactives
+# (bind s'occupe de ça automatiquement, mais on s'assure en reliant param)
+select_year.param.watch(lambda ev: bound_update(), "value")
+select_states.param.watch(lambda ev: bound_update(), "value")
+select_matiere.param.watch(lambda ev: bound_update(), "value")
+slider_min_score.param.watch(lambda ev: bound_update(), "value")
+checkbox_gender.param.watch(lambda ev: bound_update(), "active")
+
+# -------------------------------------------------------------
+# 8. TEMPLATE PANEL
+# -------------------------------------------------------------
+template = pn.template.FastListTemplate(
+    title="Students Performance Dashboard",
+    theme="dark",
+    sidebar=[
+        "### Filtres",
+        select_year,
+        select_states,
+        select_matiere,
+        slider_min_score,
+        "### Genres",
+        checkbox_gender,
+    ],
+    main=[
+        pn.Row(kpi1, kpi2, kpi3, kpi4),
+        pn.Spacer(height=20),
+        pn.Row(p1, p3),
+        pn.Spacer(height=20),
+        p2,
+        pn.Spacer(height=20),
+        p4,
+    ],
+)
+
+template.servable()
