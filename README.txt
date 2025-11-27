@@ -9,6 +9,11 @@ pip install ipykernel
 
 
 Environnement voila
-conda create -n voila python=3.8
+conda create -n voila python=3.9
 pip install voila
 pip install streamlit
+
+Environnement panel 
+conda create -n panel python=3.10
+conda activate panel
+conda install panel
